@@ -2,10 +2,13 @@ from collections import deque
 import html
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+
+# Singapore Standard Time (UTC+8)
+SGT_TZ = timezone(timedelta(hours=8))
 
 # Stores the latest event and a capped list of recent history (newest first)
 latest_webhook = None
@@ -41,7 +44,7 @@ def handle_detrack_webhook():
         job_data = {}
 
     entry = {
-        "time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "time_sgt": datetime.now(SGT_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "job_number": str(job_data.get("job_number", "-")),
         "detrack_number": str(job_data.get("detrack_number", "-")),
         "tracking_number": str(job_data.get("tracking_number", "-")),
@@ -60,7 +63,7 @@ def view_latest_webhook():
         body = "<p>Waiting for incoming webhook...</p>"
     else:
         body = f"""
-        <p><b>Time (UTC):</b> {html.escape(latest_webhook['time_utc'])}</p>
+        <p><b>Time (SGT, UTC+8):</b> {html.escape(latest_webhook['time_sgt'])}</p>
         <p><b>Job Number:</b> {html.escape(latest_webhook['job_number'])}</p>
         <p><b>Detrack #:</b> {html.escape(latest_webhook['detrack_number'])}</p>
         <p><b>Tracking #:</b> {html.escape(latest_webhook['tracking_number'])}</p>
@@ -97,7 +100,7 @@ def view_history():
                   Job: <b>{html.escape(item['job_number'])}</b> |
                   Detrack #: <b>{html.escape(item['detrack_number'])}</b> |
                   Tracking #: <b>{html.escape(item['tracking_number'])}</b><br>
-                  <small>Time (UTC): {html.escape(item['time_utc'])}</small>
+                  <small>Time (SGT, UTC+8): {html.escape(item['time_sgt'])}</small>
                 </li>
                 """
             )
