@@ -1,32 +1,19 @@
-import csv
+from collections import deque
+import html
 import json
 import os
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify, Response, send_file
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-CSV_FILE = os.environ.get("WEBHOOK_CSV_FILE", "webhook_logs.csv")
-CSV_COLUMNS = [
-    "received_at_utc",
-    "job_number",
-    "detrack_number",
-    "tracking_number",
-    "status",
-    "raw_payload_json",
-]
-
-
-def ensure_csv_exists():
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
+# Stores the latest event and a capped list of recent history (newest first)
+latest_webhook = None
+webhook_history = deque(maxlen=100)
 
 
 def extract_payload(req):
     payload = req.get_json(silent=True)
-
     if not payload and req.form:
         form_data = req.form.to_dict()
         for key in ("data", "payload"):
@@ -39,66 +26,97 @@ def extract_payload(req):
                     pass
         if not payload:
             payload = form_data
-
     return payload
-
-
-def save_webhook_record(payload):
-    ensure_csv_exists()
-    job_data = payload.get("data", payload) if isinstance(payload, dict) else {}
-    if not isinstance(job_data, dict):
-        job_data = {}
-
-    row = {
-        "received_at_utc": datetime.now(timezone.utc).isoformat(),
-        "job_number": job_data.get("job_number", ""),
-        "detrack_number": job_data.get("detrack_number", ""),
-        "tracking_number": job_data.get("tracking_number", ""),
-        "status": job_data.get("status", ""),
-        "raw_payload_json": json.dumps(payload, ensure_ascii=False),
-    }
-
-    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writerow(row)
-
-    return row
 
 
 @app.route("/api/detrack-webhook", methods=["POST"])
 def handle_detrack_webhook():
+    global latest_webhook
     payload = extract_payload(request)
     if not payload:
         return jsonify({"error": "Invalid or empty payload"}), 400
 
-    row = save_webhook_record(payload)
-    print(
-        f"Saved webhook -> Job: {row['job_number']} | "
-        f"Detrack #: {row['detrack_number']} | Status: {row['status']}"
-    )
-    return jsonify({"status": "received", "job_number": row["job_number"]}), 200
+    job_data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    if not isinstance(job_data, dict):
+        job_data = {}
+
+    entry = {
+        "time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "job_number": str(job_data.get("job_number", "-")),
+        "detrack_number": str(job_data.get("detrack_number", "-")),
+        "tracking_number": str(job_data.get("tracking_number", "-")),
+        "status": str(job_data.get("status", "-")),
+    }
+
+    latest_webhook = entry
+    webhook_history.appendleft(entry)
+
+    return jsonify({"status": "received", "job_number": entry["job_number"]}), 200
 
 
 @app.route("/webhooks", methods=["GET"])
-def view_webhooks():
-    ensure_csv_exists()
-    with open(CSV_FILE, mode="r", newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+def view_latest_webhook():
+    if not latest_webhook:
+        body = "<p>Waiting for incoming webhook...</p>"
+    else:
+        body = f"""
+        <p><b>Time (UTC):</b> {html.escape(latest_webhook['time_utc'])}</p>
+        <p><b>Job Number:</b> {html.escape(latest_webhook['job_number'])}</p>
+        <p><b>Detrack #:</b> {html.escape(latest_webhook['detrack_number'])}</p>
+        <p><b>Tracking #:</b> {html.escape(latest_webhook['tracking_number'])}</p>
+        <p><b>Status:</b> {html.escape(latest_webhook['status'])}</p>
+        """
 
-    # Show newest entries first
-    rows.reverse()
-    return jsonify({"count": len(rows), "records": rows}), 200
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="5">
+        <title>Latest Detrack Webhook</title>
+      </head>
+      <body style="font-family: sans-serif; padding: 24px;">
+        <h2>Latest Detrack Webhook (Auto-refreshes every 5s)</h2>
+        {body}
+        <p><a href="/history">View History ({len(webhook_history)})</a></p>
+      </body>
+    </html>
+    """, 200
 
 
-@app.route("/webhooks/export.csv", methods=["GET"])
-def export_webhooks_csv():
-    ensure_csv_exists()
-    return send_file(
-        CSV_FILE,
-        mimetype="text/csv",
-        as_attachment=True,
-        download_name="detrack_webhook_logs.csv",
-    )
+@app.route("/history", methods=["GET"])
+def view_history():
+    if not webhook_history:
+        list_html = "<p>No webhook history yet.</p>"
+    else:
+        items = []
+        for idx, item in enumerate(webhook_history, start=1):
+            items.append(
+                f"""
+                <li style="margin-bottom: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; list-style: none;">
+                  <b>#{idx}</b> &mdash; <b>{html.escape(item['status'])}</b><br>
+                  Job: <b>{html.escape(item['job_number'])}</b> |
+                  Detrack #: <b>{html.escape(item['detrack_number'])}</b> |
+                  Tracking #: <b>{html.escape(item['tracking_number'])}</b><br>
+                  <small>Time (UTC): {html.escape(item['time_utc'])}</small>
+                </li>
+                """
+            )
+        list_html = f"<ul style='padding-left: 0; max-width: 650px;'>{''.join(items)}</ul>"
+
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="5">
+        <title>Detrack Webhook History</title>
+      </head>
+      <body style="font-family: sans-serif; padding: 24px;">
+        <h2>Webhook History (Newest First, Auto-refreshes every 5s)</h2>
+        <p><a href="/webhooks">&larr; Back to Latest Webhook</a></p>
+        {list_html}
+      </body>
+    </html>
+    """, 200
 
 
 if __name__ == "__main__":
